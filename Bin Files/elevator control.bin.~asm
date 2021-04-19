@@ -1,0 +1,586 @@
+#make_bin#
+
+#LOAD_SEGMENT=FFFFh#
+#LOAD_OFFSET=0000h#
+
+#CS=0000h#
+#IP=0000h#
+
+#DS=0000h#
+#ES=0000h#
+
+#SS=0000h#
+#SP=FFFEh#
+
+#AX=0000h#
+#BX=0000h#
+#CX=0000h#
+#DX=0000h#
+#SI=0000h#
+#DI=0000h#
+#BP=0000h#
+
+
+jmp st1
+nop
+;int 1 is not used so 1 x4 = 00004h - it is stored with 0
+dw      0000
+dw      0000
+;eoc - is used as nmi - ip value points to ad_isr and cs value will
+;remain at 0000
+dw      nmi_isr
+dw      0000
+TABLE_I    DB 77H, 7BH, 7DH, 7EH, 0BBH, 0BDH, 0BEH, 0D7H, 0DBH, 0DDH, 0DEH, 0E7H, 0EBH,  0EDH    ;keypad input and sensors
+;          CS1  Fine CS2  Gnd  1up  1in  1dwn 2up  2in  2dwn 3in 3dwn  clse gnd-in
+
+cnt0 equ 00h ; temp
+cnt1 equ 02h ; temp
+cnt2 equ 04h ; temp
+c_reg1 equ 06h ; temp
+
+pa1 equ 08h ; temp
+pb1 equ 0Ah ; temp
+pc1 equ 0Ch ; temp
+c_reg2 equ 0Eh ; temp
+
+
+
+floor db 0
+fine db 0
+cu_floor db 0
+cl_floor db 0
+door_close db 0
+dir_bit db 0
+slow db 0
+fl_btn db 0
+lt_btn db 0
+;press db 0
+;press_out db 0
+
+lt_mov db 0 ; is lift moving? 1 = yes
+db 1000 dup(0)
+
+
+st1:
+;initialising 8255
+
+;setting counter 1 to mode 1
+mov al, 10000010b
+out c_reg2, al
+;initialising 8253
+;Setting counter 0 to mode 2 and giving count of 9
+mov       al,00010100b
+out       06h,al
+mov       al,09h
+out       00h,al
+
+mov       al,01010010b ; setting counter 1 to mode 1
+out       06h,al
+mov       al, 0
+out       02h, al ; giving count of 0 to ensure lift does not move (0% pwm)
+
+wait_nmi: jmp wait_nmi ;waiting for a button to be pressed
+
+
+
+;taking inputs
+
+;taking inputs using keyboard matrix
+nmi_isr:
+
+PUSH BX
+PUSH CX
+PUSH DX
+
+;send 0's to all rows
+mov al,00h
+mov dx, pa1
+out dx,al
+
+;read columns
+mov dx,pb1   ; load input port address
+
+wait_open :
+in al,dx
+and al,0fh
+cmp al,0fh
+jne wait_open
+
+;read colunms to see if key is pressed
+wait_press :
+in al,dx
+and al,0fh
+cmp al,0fh
+je wait_press
+
+call delay_20ms
+
+;read columns to see if key still pressed
+in al,dx
+and al,0fh
+cmp al,0fh
+je wait_press
+
+call delay_20ms
+
+;find key
+mov al,0feh
+mov cl,al
+
+
+
+next_row:
+mov dx, pb1
+in al, dx
+and al,0fh
+cmp al,0fh
+jne encode
+rol cl,01
+mov al,cl
+jmp next_row
+
+
+encode:
+mov bx,000fh
+in al,dx
+
+try_next :
+cmp al,table_I[bx]
+je done
+dec bx
+jns try_next
+mov ah,01h
+jmp exit
+
+
+done:
+mov al,bl
+mov ah,00h
+
+
+
+exit:
+call key_press
+POP DX
+POP CX
+POP BX
+POPF
+iret ;;; changed ret to iret
+
+
+;sub-routine to set the button pressed by the user
+PROC key_press
+PUSHF
+PUSH BX
+PUSH CX
+PUSH DX
+
+
+y1:
+cmp al, 77h
+jnz y2
+;mov al, 0ah
+;mov al,1
+;mov cs1,al
+;calling lower coarse sensor subroutine
+call coarse_lower
+jmp y0
+
+y2:
+cmp al, 7Bh
+jnz y3
+;mov al, 00h
+;mov al,1
+mov fine,al
+;calling fine sensor subroutine
+call fine_sensor
+jmp y0
+
+y3:
+cmp al, 7Dh
+jnz y4
+;mov al,0bh
+;mov al,1
+;mov cs2,al
+;calling upper coarse sensor subroutine
+call coarse_upper
+jmp y0
+
+y4:
+cmp al, 7Eh
+jnz y5
+; mov al, 0ch
+; mov al,1
+;mov ground_up,al
+mov al, 00000010b
+or al, fl_btn ; setting corresponding bit if it is not already set
+mov fl_btn, al ; moving variable back to memory
+jmp y0
+
+y5:
+cmp al, 0EDh
+jnz y6
+;mov al, 01h
+;mov al,1
+;mov ground_in,al
+mov al, 00000001b
+or al, lt_btn ; setting corresponding bit if it is not already set
+mov lt_btn, al ; moving variable back to memory
+jmp y0
+
+y6:
+cmp al, 0BBh
+jnz y7
+;mov al, 02h
+;mov al,1
+;mov first_up,al
+mov al, 00001000b
+or al, fl_btn ; setting corresponding bit if it is not already set
+mov fl_btn, al ; moving variable back to memory
+jmp y0
+
+y7:
+cmp al, 0BDh
+jnz y8
+;mov al, 03h
+;mov al,1
+;mov first_in,al
+mov al, 00000010b
+or al, lt_btn ; setting corresponding bit if it is not already set
+mov lt_btn, al ; moving variable back to memory
+jmp y0
+
+y8:
+cmp al, 0BEh
+jnz y9
+;mov al, 0dh
+;mov al,01h
+;mov first_down,al
+mov al, 00000100b
+or al, fl_btn ; setting corresponding bit if it is not already set
+mov fl_btn, al ; moving variable back to memory
+jmp y0
+
+y9:
+cmp al, 0D7h
+jnz yA
+;mov al, 04h
+;mov al,01h
+;mov second_up,al
+mov al, 00100000b
+or al, fl_btn ; setting corresponding bit if it is not already set
+mov fl_btn, al ; moving variable back to memory
+jmp y0
+
+yA:
+cmp al, 0DBh
+jnz yB
+;mov al, 05h
+;mov al,01h
+;mov second_in,al
+mov al, 00000010b
+or al, lt_btn ; setting corresponding bit if it is not already set
+mov lt_btn, al ; moving variable back to memory
+jmp y0
+
+yB:
+cmp al, 0DDh
+jnz yC
+;mov al,1
+;mov second_down,al
+mov al, 00010000b
+or al, fl_btn ; setting corresponding bit if it is not already set
+mov fl_btn, al ; moving variable back to memory
+jmp y0
+
+yC:
+cmp al, 0DEh
+jnz yD
+;mov al, 0eh
+;mov al,1
+;mov third_in,al
+mov al, 00000010b
+or al, lt_btn ; setting corresponding bit if it is not already set
+mov lt_btn, al ; moving variable back to memory
+jmp y0
+
+yD:
+cmp al, 0E7h
+jnz yE
+;mov al, 07h
+;mov al,01h
+;mov third_down,al
+mov al, 00000010b
+or al, lt_btn ; setting corresponding bit if it is not already set
+mov lt_btn, al ; moving variable back to memory
+jmp y0
+
+yE:
+cmp al, 0EBh
+jnz y0
+;mov al,08h
+mov al,01h
+mov door_close, al
+;set
+jmp y0
+
+
+
+y0:
+nop ; put program here to check if we need to start or not
+
+POP DX
+POP CX
+POP BX
+POPF
+ret
+ENDP key_press
+
+
+PROC stpchk
+;push all registers
+
+push bx
+push cx
+push dx
+
+mov dx, ax
+mov cl, dl
+mov al, 00000001b
+rol al, cl ; bit is at respective floor
+mov bl ,al
+and bl, lt_btn
+jnz stop_ ; if button inside lift is not pressed, we check for button outside
+mov cl, dl
+add cl, dh
+rol al, cl ; bit is at respective floor*2 + direction_bit
+and al, fl_btn
+jz nostp
+
+stop_:    call stope
+nostp:
+
+Pop dx
+Pop cx
+Pop bx    ;returing original values to the register
+ret
+stpchk endp
+
+stope proc near
+mov al, 6  ;setting pwm to 40%
+out 0Ah, al
+call delay1
+
+mov al, 7   ;setting pwm to 30%
+out 0Ah, al
+call delay1
+
+mov al, 8   ;setting pwm to 20%
+out 0Ah, al
+
+mov al, 1
+mov slow, al ; set flag that lift is slow
+
+ret
+stope endp
+
+;delay subroutine
+delay1 proc near
+push cx
+mov cx, 65000
+del1: nop
+nop
+nop
+nop
+nop
+nop
+nop
+nop
+loop del1
+
+pop cx
+ret
+ENDP delay1
+
+;start lift subroutine
+PROC start1  ;subroutine to start the lift moving
+mov al, 8       ;setting pwm to 20%
+out cnt1, al
+call delay1
+
+mov al, 7       ;setting pwm to 30%
+out cnt1, al
+call delay1
+
+mov al, 6   ;setting pwm to 40%
+out cnt1, al
+call delay1
+
+mov al, 5   ;setting pwm to 50%
+out cnt1, al
+
+mov al, 0
+mov slow, al ; set flag that lift is not slow
+
+ret
+ENDP    start1
+
+PROC   setdir      ;ah is passed as parameter with the floor we want to go
+mov al, floor ; mov the current floor into al
+cmp ah, al
+jg dir0
+mov al, 1
+mov dir_bit, al ; store dir_bit as up(1)
+jmp dir1
+dir0: mov al, 0
+mov dir_bit, al ; store dir_bit as down (0)
+dir1: ret
+ENDP    setdir
+
+;subroutine to check if lift is moving when a button is pressed, and if not, to start moving it
+PROC check_start ;ah has the floor of the button pressed
+push BX
+push cx
+mov bx, ax
+mov al, lt_mov
+cmp al, 1
+jz no_start
+mov ah, bh
+call setdir
+;out direction bit to lift motor
+call start1
+mov al, 1
+mov lt_mov, al
+no_start:
+pop cx
+pop bx
+ret
+ENDP check_start
+
+;subroutine for lower coarse sensor
+PROC coarse_lower
+mov al, cl_floor
+mov bl, dir_bit
+cmp bl, 1
+jnz dec_fs
+inc al
+jmp fs
+dec_cl: dec al
+cl:    mov cl_floor, al
+cmp bl, 1
+jnz bot_cl
+call stpchk ; checks if it needs to stop at respective floor(given using al), and if so , it sets pwm to 20% along with setting the slow flag
+bot_cl:    ret
+ENDP coarse_lower
+
+;subroutine for upper coarse sensor
+PROC coarse_upper
+mov al, cu_floor
+mov bl, dir_bit
+cmp bl, 1
+jnz dec_fs
+inc al
+jmp fs
+dec_cu: dec al
+cu:    mov cu_floor, al
+cmp bl, 0
+jnz bot_cu
+call stpchk ; checks if it needs to stop at respective floor(given using al), and if so , it sets pwm to 20% along with setting the slow flag
+bot_cu:    ret
+ENDP coarse_lower
+
+
+
+;subroutine for fine sensor
+PROC fine_sensor
+push bx
+mov al, floor
+mov bl, dir_bit
+cmp bl, 1
+jnz dec_fs
+inc ax
+jmp fs
+dec_fs: dec ax
+fs:    mov floor, al   ;incrementing the floor we are on
+out pb1, al ; giving the floor number to the 7 segment displays
+mov al, slow
+cmp al, 1
+jnz end_fine
+mov al, 0
+out cnt1, al; setting pwm cycle to 0 //still needs to be tested if this can be done, otherwise we use 8255 BSR mode to give a 0 to the gate of the counter
+;out ;;BSR MODE for C6 I think (open door)
+end_fine :
+call check_floor ; calling subroutine to check if any button has been pressed, and if so, to move lift there if no one enters lift and presses the button inside?
+ret
+ENDP    fine_sensor
+
+
+
+
+;subroutine to find if a button is pressed once the lift has stopped, and if it is, to call the start moving lift function with the floor it was pressed for
+PROC check_floor
+push BX
+push cx
+mov bl, lt_btn
+mov bh, fl_btn
+
+chkf0:      ;checking if a floor 0 button is pressed
+mov al, 00000001b
+mov ah, 00000011b
+and ax, bx
+cmp ax, 0
+jz chkf1
+mov ah, 0
+call check_start
+jmp bot_check_floor
+
+chkf1:  ;checking if a floor 1 button is pressed
+mov al, 00000010b
+mov ah, 00001100b
+and ax, bx
+cmp ax, 0
+jz chkf1
+mov ah, 1
+call check_start
+jmp bot_check_floor
+
+chkf2:  ;checking if a floor 2 button is pressed
+mov al, 00000100b
+mov ah, 00110000b
+and ax, bx
+cmp ax, 0
+jz chkf1
+mov ah, 2
+call check_start
+jmp bot_check_floor
+
+chkf3:  ;checking if a floor 3 button is pressed
+mov al, 00001000b
+mov ah, 11000000b
+and ax, bx
+cmp ax, 0
+jz chkf1
+mov ah, 3
+call check_start
+jmp bot_check_floor
+
+bot_check_floor:
+ret
+ENDP    check_floor
+
+PROC delay_20ms
+push cx
+mov cx, 5000
+del20: nop
+nop
+nop
+nop
+nop
+loop del20
+push cx
+ret
+ENDP delay_20ms
+
+
+
+; [SOURCE]: C:\Users\harsh\Downloads\main(1).asm
